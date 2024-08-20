@@ -1,4 +1,5 @@
-// Project
+#include "actions.h"
+#include "controller.h"
 #include "resources.h"
 
 // ESP SDK
@@ -9,17 +10,24 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
+// FreeRTOS
+#include "FreeRTOS.h"
+#include "freertos/task.h"
+
 // C
+#include <sys/socket.h>
 #include <stdint.h>
 #include <string.h>
 
+#define STATUS_READ_MS   250 // Time period between status reads
+
+// Timeout waiting on the status to change in ticks
+// This can be calculated as (1000 / STATUS_READ_MS) * N_SEC
+#define STATUS_TIMEOUT_T  32
+
 static const char* module_id = "wifi";
 
-static esp_err_t handle_post_action(httpd_req_t *request) {
-  return httpd_resp_send_404(request);
-}
-
-static esp_err_t handle_get_resource(httpd_req_t *request) {
+static esp_err_t handle_get_resource(httpd_req_t* request) {
   const char *start;
   const char *end;
 
@@ -32,9 +40,125 @@ static esp_err_t handle_get_resource(httpd_req_t *request) {
     return httpd_resp_send_404(request);
   }
 
-  httpd_resp_set_type(request, HTTPD_TYPE_TEXT);
-
   return httpd_resp_send(request, start, end - start - 1);
+}
+
+static esp_err_t handle_get_actions(httpd_req_t* request) {
+  char   buffer[256 + 1];
+  size_t length = sizeof(actions) / sizeof(TAction);
+
+  httpd_resp_set_type(request, HTTPD_TYPE_JSON);
+
+  // To save some memory at the cost of speed send a chunked response containing
+  // all the actions available
+  httpd_resp_send_chunk(request, "[", 1);
+
+  for (size_t i = 0; i < length; i++) {
+    sprintf(buffer,
+      "{\"i\":\"%c\",\"d\":\"%s\"}", actions[i].id, actions[i].description
+    );
+
+    httpd_resp_send_chunk(request, buffer, -1);
+
+    if (i + 1 < length) {
+      httpd_resp_send_chunk(request, ",", 1);
+    }
+  }
+
+  httpd_resp_send_chunk(request, "]", 1);
+
+  return httpd_resp_send_chunk(request, NULL, 0);
+}
+
+static esp_err_t handle_get_status(httpd_req_t* request) {
+  char    buffer[256 + 1];
+  size_t  buffer_size = sizeof(buffer) / sizeof(char);
+  bool    requested_aborted;
+  int     socket_fd;
+  int32_t status;
+  char*   last_char;
+
+  // Get the status sent by the remote client and fail with 400/Bad Request if
+  // the request is not valid
+  if (
+    httpd_req_get_url_query_str(request, buffer, buffer_size) != ESP_OK ||
+    httpd_query_key_value(buffer, "s", buffer, buffer_size)   != ESP_OK
+  ) {
+    httpd_resp_set_status(request, HTTPD_400);
+
+    return httpd_resp_send(request, NULL, 0);
+  }
+
+  // Parse the received status and fail with 400/Bad Request if the string sent
+  // cannot be parsed as a number
+  status = strtol(buffer, &last_char, 10);
+
+  if (*last_char != 0) {
+    httpd_resp_set_status(request, HTTPD_400);
+
+    return httpd_resp_send(request, NULL, 0);
+  }
+
+  // Wait for the status to change or the timeout to expire or the client to
+  // abort the request, whichever occurs first
+  socket_fd         = httpd_req_to_sockfd(request);
+  requested_aborted = false;
+
+  for (size_t i = 0; status == ctl_get_status() && i < STATUS_TIMEOUT_T; i++) {
+    // If this call returns 0 then there is no bytes pending to be to read,
+    // which means the client, potentially, closed the socket on its end
+    if (recv(socket_fd, NULL, 0, MSG_DONTWAIT) == 0) {
+      requested_aborted = true; // Client has aborted the request
+
+      break;
+    }
+
+    vTaskDelay(STATUS_READ_MS / portTICK_RATE_MS);
+  }
+
+  if (requested_aborted) {
+    return ESP_FAIL;
+  }
+
+  // Send the controller status to the client, which may have changed or not;
+  // but in any case send it as well as the corresponding friendly description
+  // and the flag indicating whether the controller is busy or not
+  sprintf(
+    buffer,
+    "{\"s\":%d,\"t\":\"%s\",\"b\":%d}",
+    ctl_get_status     (),
+    ctl_get_status_text(),
+    ctl_is_busy        () ? 1 : 0
+  );
+
+  httpd_resp_set_type(request, HTTPD_TYPE_JSON);
+
+  return httpd_resp_send(request, buffer, -1);
+}
+
+static esp_err_t handle_post_action(httpd_req_t* request) {
+  char   buffer[64 + 1];
+  size_t buffer_size = sizeof(buffer) / sizeof(char);
+
+  // If the request is valid then execute the requested action and return
+  // the 200/OK response immediately
+  if (
+    httpd_req_get_url_query_str(request, buffer, buffer_size) == ESP_OK &&
+    httpd_query_key_value(buffer, "a", buffer, buffer_size)   == ESP_OK
+  ) {
+    for (size_t i = 0; i < sizeof(actions) / sizeof(TAction); i++) {
+      if (buffer[0] == actions[i].id) {
+        actions[i].fn();
+
+        return httpd_resp_send(request, NULL, 0);
+      }
+    }
+  }
+
+  // Otherwise, send a 400/Bad Request response
+  httpd_resp_set_status(request, HTTPD_400);
+
+  return httpd_resp_send(request, NULL, 0);
 }
 
 static esp_err_t set_up_wifi() {
@@ -88,8 +212,10 @@ static esp_err_t set_up_http() {
     );
   } else { // Register URI handlers
     const httpd_uri_t handlers[] = {
-      { .method = HTTP_GET , .uri = "/"      , .handler = handle_get_resource },
-      { .method = HTTP_POST, .uri = "/action", .handler = handle_post_action  },
+      { .method = HTTP_GET , .uri = "/"       , .handler = handle_get_resource },
+      { .method = HTTP_GET , .uri = "/actions", .handler = handle_get_actions  },
+      { .method = HTTP_GET , .uri = "/status" , .handler = handle_get_status   },
+      { .method = HTTP_POST, .uri = "/action" , .handler = handle_post_action  },
     };
 
     for (size_t i = 0; i < sizeof(handlers) / sizeof(httpd_uri_t); i++) {

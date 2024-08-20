@@ -1,4 +1,6 @@
+#include "actions.h"
 #include "common.h"
+#include "controller.h"
 #include "wifi.h"
 
 // ESP8266
@@ -12,9 +14,11 @@
 
 // FreeRTOS
 #include "FreeRTOS.h"
+#include "freertos/task.h"
 
-#define LED_ON_US   40000
-#define LED_OFF_US  800000
+#define LED_ON_US        40000 // The time the LED must be ON
+#define LED_OFF_US      800000 // The time the LED must be OFF
+#define BUFFER_READ_MS     250 // Time period between input buffer reads
 
 static void IRAM_ATTR frc_timer_isr_cb() {
   frc1.ctrl.en = 0;
@@ -39,12 +43,14 @@ static void configure_gpio() {
   PIN_PULLUP_EN  (PERIPHS_IO_MUX_MTDI_U);
   PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, /* XLT_PORT */ FUNC_GPIO12);
 
-  gpio_set_direction(XLT_PORT , GPIO_MODE_OUTPUT);
-  gpio_set_direction(XRST_PORT, GPIO_MODE_OUTPUT);
-
   gpio_set_direction(LED_PORT , GPIO_MODE_OUTPUT);
-  gpio_pulldown_en  (LED_PORT);
-  SET_HI            (LED_PORT);
+  SET_HI(LED_PORT);
+
+  gpio_set_direction(XLT_PORT , GPIO_MODE_OUTPUT);
+  SET_HI(XLT_PORT);
+
+  gpio_set_direction(XRST_PORT, GPIO_MODE_OUTPUT);
+  SET_LO(XRST_PORT);
 }
 
 static void configure() {
@@ -56,7 +62,29 @@ static void configure() {
   portEXIT_CRITICAL();
 }
 
+static void show_menu() {
+  printf("\n");
+
+  for (size_t i = 0; i < sizeof(actions) / sizeof(TAction); i++) {
+    printf("%c. %s\n", actions[i].id, actions[i].description);
+  }
+
+  printf("\n");
+}
+
+static void process_option(char option) {
+  for (size_t i = 0; i < sizeof(actions) / sizeof(TAction); i++) {
+    if (option == actions[i].id) {
+      actions[i].fn();
+
+      break;
+    }
+  }
+}
+
 void run_sender() {
+  int32_t status = -1;
+
   configure();
 
   // Install the new vector
@@ -74,43 +102,51 @@ void run_sender() {
   }
 #endif
 
-  printf("Waiting for Controller PCB to be powered up...\n");
-
   while (true) {
-    uint16_t v;
+    // If the status has changed then print the friendly description of the new
+    // status and show the menu iif the controller is ready
+    if (status != ctl_get_status()) {
+      status = ctl_get_status();
 
-    // Read the voltage at ADC pin - It seems interrupts must be disabled...
-    {
-      portENTER_CRITICAL();
+      printf("\033[1mStatus\033[22m: %s\n", ctl_get_status_text());
 
-      v = test_tout();
+      if (!ctl_is_busy()) {
+        show_menu();
 
-      portEXIT_CRITICAL();
+        // Clear input buffer after an action has been completed
+        while ((fgetc(stdin)) != EOF);
+      }
     }
 
-    if (
-      v >= POWER_ON_STATUS_MIN &&
-      v <= POWER_ON_STATUS_MAX
-    ) { // We got power - Exit...
-      SET_HI(GPIO_NUM_2);
+    // If the controller is not busy then read the input buffer and execute the
+    // requested action if the buffer is not empty
+    if (!ctl_is_busy()) {
+      int option = fgetc(stdin);
 
-      break;
+      if (option != EOF) {
+        process_option(option);
+      }
+
+      vTaskDelay(BUFFER_READ_MS / portTICK_RATE_MS);
     }
 
-    if (frc1.ctrl.en == 0) {
-      if (gpio_get_level(GPIO_NUM_2) == 1) {
-        SET_LO(GPIO_NUM_2);
+    if (status == STATUS_WAIT_FOR_POWER && frc1.ctrl.en == 0) {
+      // It is safe to use the FRC timer at this point as if we are here it
+      // means the controller board has no power
+
+      if (gpio_get_level(LED_PORT) == 1) {
+        SET_LO(LED_PORT);
 
         frc1.load.data = US_TO_TICKS(LED_ON_US);
       } else {
-        SET_HI(GPIO_NUM_2);
+        SET_HI(LED_PORT);
 
         frc1.load.data = US_TO_TICKS(LED_OFF_US);
       }
 
       frc1.ctrl.en = 1;
     }
-  }
 
-  printf("Got powered up\n");
+    portYIELD();
+  }
 }
