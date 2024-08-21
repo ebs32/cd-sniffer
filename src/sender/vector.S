@@ -34,7 +34,7 @@
     .section    .init
 
     .align      16
-    .global     VectorBase                        # Export to C
+    .global     VectorBase                              # Export to C
 VectorBase:
 
     /* DebugExceptionVector
@@ -98,7 +98,10 @@ _UserExceptionHandler:
     s32i        a1,  a0,  0
 
     # Save Special Register INTERRUPT (#226) to _Interrupt
+    movi        a0,  _Interrupt
+    l32i        a0,  a0,  0
     rsr         a1,  interrupt
+    or          a1,  a1, a0
     movi        a0,  _Interrupt
     s32i        a1,  a0,  0
 
