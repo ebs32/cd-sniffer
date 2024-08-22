@@ -12,7 +12,7 @@
   <body>
     <div id="main">
       <div class="spacer">
-        Status: <span id="status">Waiting...</span>
+        Status: <span id="status">Initializing...</span>
       </div>
       <hr>
       <div class="spacer" id="actions"></div>
@@ -93,7 +93,7 @@
         // Abort the status request to avoid blocking this request
         status_xhr.abort()
 
-        // While the  status request will potentially disable the button, this
+        // While the status request will potentially disable the button, this
         // is required to avoid any event between the end of this call and the
         // status request response
         document.getElementById("send").setAttribute("disabled", "")
