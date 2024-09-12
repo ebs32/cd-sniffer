@@ -10,9 +10,9 @@
  *
  * @returns 0, on success; -1, on error.
  */
-int32_t start_wifi();
+int32_t wifi_start();
 
 /**
  * Stops the WiFi service and the HTTP server.
  */
-void stop_wifi();
+void wifi_stop();

@@ -12,6 +12,8 @@
 #define CLK_PORT        GPIO_NUM_14 // D5
 #define XLT_PORT        GPIO_NUM_12 // D6
 #define DATA_PORT       GPIO_NUM_13 // D7
+#define FOK_PORT        GPIO_NUM_5  // D1
+#define SENS_PORT       GPIO_NUM_4  // D2
 
 // Macros for setting the level of the GPIO ports - I found it is way faster to
 // use those rather than writing to the GPIO struct

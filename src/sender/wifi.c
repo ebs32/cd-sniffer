@@ -19,13 +19,30 @@
 #include <stdint.h>
 #include <string.h>
 
-#define STATUS_READ_MS   250 // Time period between status reads
+#define STATUS_READ_MS      250 // Time period between status reads
 
 // Timeout waiting on the status to change in ticks
 // This can be calculated as (1000 / STATUS_READ_MS) * N_SEC
-#define STATUS_TIMEOUT_T  32
+#define STATUS_TIMEOUT_T      8
+
+#define EVENT_BUFFER_SIZE    16 // Size of the event buffer
+#define MAX_COMMAND_LENGTH  512 // Maximum number of commands to read
 
 static const char* module_id = "wifi";
+
+static TEvent events[EVENT_BUFFER_SIZE];
+static size_t read_idx  = 0;
+static size_t write_idx = 0;
+
+static void handle_ctl_update(const TEvent* event) {
+  events[write_idx].is_busy     = event->is_busy;
+  events[write_idx].is_powered  = event->is_powered;
+  events[write_idx].status_text = event->status_text;
+
+  if (++write_idx == EVENT_BUFFER_SIZE) {
+    write_idx = 0;
+  }
+}
 
 static esp_err_t handle_get_resource(httpd_req_t* request) {
   const char *start;
@@ -71,64 +88,44 @@ static esp_err_t handle_get_actions(httpd_req_t* request) {
 }
 
 static esp_err_t handle_get_status(httpd_req_t* request) {
-  char    buffer[256 + 1];
-  size_t  buffer_size = sizeof(buffer) / sizeof(char);
-  bool    requested_aborted;
-  int     socket_fd;
-  int32_t status;
-  char*   last_char;
-
-  // Get the status sent by the remote client and fail with 400/Bad Request if
-  // the request is not valid
-  if (
-    httpd_req_get_url_query_str(request, buffer, buffer_size) != ESP_OK ||
-    httpd_query_key_value(buffer, "s", buffer, buffer_size)   != ESP_OK
-  ) {
-    httpd_resp_set_status(request, HTTPD_400);
-
-    return httpd_resp_send(request, NULL, 0);
-  }
-
-  // Parse the received status and fail with 400/Bad Request if the string sent
-  // cannot be parsed as a number
-  status = strtol(buffer, &last_char, 10);
-
-  if (*last_char != 0) {
-    httpd_resp_set_status(request, HTTPD_400);
-
-    return httpd_resp_send(request, NULL, 0);
-  }
+  char   buffer[256 + 1];
+  size_t idx;
+  int    socket_fd;
 
   // Wait for the status to change or the timeout to expire or the client to
   // abort the request, whichever occurs first
-  socket_fd         = httpd_req_to_sockfd(request);
-  requested_aborted = false;
+  socket_fd = httpd_req_to_sockfd(request);
 
-  for (size_t i = 0; status == ctl_get_status() && i < STATUS_TIMEOUT_T; i++) {
+  for (size_t i = 0; read_idx == write_idx && i < STATUS_TIMEOUT_T; i++) {
     // If this call returns 0 then there is no bytes pending to be to read,
     // which means the client, potentially, closed the socket on its end
     if (recv(socket_fd, NULL, 0, MSG_DONTWAIT) == 0) {
-      requested_aborted = true; // Client has aborted the request
-
-      break;
+      return ESP_FAIL;
     }
 
     vTaskDelay(STATUS_READ_MS / portTICK_RATE_MS);
   }
 
-  if (requested_aborted) {
-    return ESP_FAIL;
-  }
-
   // Send the controller status to the client, which may have changed or not;
   // but in any case send it as well as the corresponding friendly description
   // and the flag indicating whether the controller is busy or not
+
+  if(read_idx == write_idx) {
+    idx = (read_idx == 0 ? EVENT_BUFFER_SIZE : read_idx) - 1;
+  } else {
+    idx = read_idx;
+
+    if (++read_idx == EVENT_BUFFER_SIZE) {
+      read_idx = 0;
+    }
+  }
+
   sprintf(
     buffer,
-    "{\"s\":%d,\"t\":\"%s\",\"b\":%d}",
-    ctl_get_status     (),
-    ctl_get_status_text(),
-    ctl_is_busy        () ? 1 : 0
+    "[{\"s\":%d,\"t\":\"%s\",\"b\":%d}]",
+    events[idx].is_powered,
+    events[idx].status_text,
+    events[idx].is_busy
   );
 
   httpd_resp_set_type(request, HTTPD_TYPE_JSON);
@@ -157,6 +154,50 @@ static esp_err_t handle_post_action(httpd_req_t* request) {
 
   // Otherwise, send a 400/Bad Request response
   httpd_resp_set_status(request, HTTPD_400);
+
+  return httpd_resp_send(request, NULL, 0);
+}
+
+static esp_err_t handle_post_commands(httpd_req_t* request) {
+  uint16_t length;
+  uint16_t size;
+  char*    buffer;
+
+  // The first two bytes indicate the number of commands to read
+  if (httpd_req_recv(request, (char*) &length, sizeof(uint16_t)) != sizeof(uint16_t)) {
+    httpd_resp_set_status (request, HTTPD_500);
+
+    return httpd_resp_send(request, NULL, 0);
+  }
+
+  if (length > MAX_COMMAND_LENGTH) {
+    httpd_resp_set_status (request, HTTPD_400);
+
+    return httpd_resp_send(request, NULL, 0);
+  }
+
+  // Read the commands
+  size   = length * sizeof(int16_t);
+  buffer = (char*) malloc(size);
+
+  if (buffer == NULL) {
+    httpd_resp_set_status (request, HTTPD_500);
+
+    return httpd_resp_send(request, NULL, 0);
+  }
+
+  for (int m = 0, s; m < size; m += s) {
+    s = httpd_req_recv(request, &buffer[m], size - m);
+
+    if (s <= 0) {
+      httpd_resp_set_status (request, HTTPD_500);
+
+      return httpd_resp_send(request, NULL, 0);
+    }
+  }
+
+  // Run the commands - The buffer will be freed by the controller API
+  ctl_run_micom_commands(length, (uint16_t*) buffer);
 
   return httpd_resp_send(request, NULL, 0);
 }
@@ -212,10 +253,11 @@ static esp_err_t set_up_http() {
     );
   } else { // Register URI handlers
     const httpd_uri_t handlers[] = {
-      { .method = HTTP_GET , .uri = "/"       , .handler = handle_get_resource },
-      { .method = HTTP_GET , .uri = "/actions", .handler = handle_get_actions  },
-      { .method = HTTP_GET , .uri = "/status" , .handler = handle_get_status   },
-      { .method = HTTP_POST, .uri = "/action" , .handler = handle_post_action  },
+      { .method = HTTP_GET , .uri = "/"        , .handler = handle_get_resource  },
+      { .method = HTTP_GET , .uri = "/actions" , .handler = handle_get_actions   },
+      { .method = HTTP_GET , .uri = "/status"  , .handler = handle_get_status    },
+      { .method = HTTP_POST, .uri = "/action"  , .handler = handle_post_action   },
+      { .method = HTTP_POST, .uri = "/commands", .handler = handle_post_commands },
     };
 
     for (size_t i = 0; i < sizeof(handlers) / sizeof(httpd_uri_t); i++) {
@@ -244,17 +286,17 @@ static esp_err_t set_up_http() {
   return status;
 }
 
-void stop_wifi() {
+void wifi_stop() {
   esp_wifi_stop                ();
   tcpip_adapter_stop           (TCPIP_ADAPTER_IF_AP);
   nvs_flash_deinit             ();
   esp_event_loop_delete_default();
 }
 
-int32_t start_wifi() {
+int32_t wifi_start() {
   if (set_up_wifi() == ESP_OK) {
-    if (set_up_http() != ESP_OK) {
-      stop_wifi();
+    if (set_up_http() != ESP_OK || ctl_add_listener(handle_ctl_update) != 0) {
+      wifi_stop();
 
       return -1;
     }

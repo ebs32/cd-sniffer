@@ -8,4 +8,4 @@ typedef struct {
 } TAction;
 
 // Contains all the actions implemented in the controller
-const TAction actions[2];
+const TAction actions[7];
