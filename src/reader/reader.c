@@ -114,13 +114,13 @@ static void IRAM_ATTR read_lead_in() {
 
         if (tno == 0) {
           uint8_t point   = (REVERSE((q0 >> 12) & 0xf) << 4)
-                          | (REVERSE((q0 >> 8) & 0xf));
+                          | (REVERSE((q0 >>  8) & 0xf));
           uint8_t p_min   = (REVERSE((q1 >>  4) & 0xf) << 4)
-                          | (REVERSE((q1 >> 0) & 0xf));
+                          | (REVERSE((q1 >>  0) & 0xf));
           uint8_t p_sec   = (REVERSE((q2 >> 12) & 0xf) << 4)
-                          | (REVERSE((q2 >> 8) & 0xf));
+                          | (REVERSE((q2 >>  8) & 0xf));
           uint8_t p_frame = (REVERSE((q2 >>  4) & 0xf) << 4)
-                          | (REVERSE((q2 >> 0) & 0xf));
+                          | (REVERSE((q2 >>  0) & 0xf));
 
           switch (point) {
           case 0xA0:
