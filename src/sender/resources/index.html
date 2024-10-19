@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>CD Sniffer - Sender</title>
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1">
+    <style>
+      body    { margin: 1vh; }
+      .spacer { margin: 1vh; }
+      #status { color: steelblue }
+    </style>
+  </head>
+  <body>
+    <div id="main">
+      <div class="spacer">
+        Status: <span id="status">Initializing...</span>
+      </div>
+      <hr>
+      <div class="spacer">
+        <b>Actions</b>
+      </div>
+      <div class="spacer" id="actions"></div>
+      <button class="spacer" id="postAction" disabled>Execute</button>
+      <hr>
+      <div class="spacer" style="padding-right: 1vh;">
+        <b>Commands</b>
+        <ul>
+          <li>For setting the tracking balance: 844 800 ~ 81f</li>
+          <li>For setting the tracking grain: 848 820 ~ 83f</li>
+        </ul>
+      </div>
+      <div class="spacer">
+        <input type="text" id="commands" style="width:100%">
+      </div>
+      <button class="spacer" id="postCommands" disabled>Execute</button>
+    </div>
+    <script type="module">
+      const status_xhr   = new XMLHttpRequest()
+
+      const addAction    = (actionPayload) => {
+        const root   = document.getElementById("actions")
+        const action = document.createElement("div")
+        const id     = `a_${actionPayload.i}`
+        let   node;
+
+        // Create and append the input element
+        node = document.createElement("input")
+
+        node.setAttribute("type" , "radio"        )
+        node.setAttribute("name" , "action"       )
+        node.setAttribute("id"   , id             )
+        node.setAttribute("value", actionPayload.i)
+
+        action.appendChild(node)
+
+        // Create and append the label for the input element
+        node = document.createElement("label")
+
+        node.setAttribute("for" , id)
+        node.innerText = actionPayload.d
+
+        action.appendChild(node)
+
+        // Append the new action to the action container
+        root.appendChild(action)
+      }
+      const setStatus    = (statusPayload) => {
+        document.getElementById("status").innerText = statusPayload.t
+
+        if (statusPayload.b === 0 && statusPayload.s == 1) {
+          document.getElementById("postAction"  ).removeAttribute("disabled")
+          document.getElementById("postCommands").removeAttribute("disabled")
+        } else {
+          document.getElementById("postAction"  ).setAttribute("disabled", "")
+          document.getElementById("postCommands").setAttribute("disabled", "")
+        }
+      }
+      const getActions   = () => {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+
+          xhr.onerror   = reject
+          xhr.ontimeout = reject
+          xhr.onload    = () => {
+            if (xhr.status !== 200) {
+              return reject(`Unexpected HTTP Status: ${xhr.status}`)
+            }
+
+            try {
+              resolve(
+                JSON.parse(xhr.response)
+              )
+            } catch (error) {
+              reject(error)
+            }
+          }
+
+          xhr.open('GET', `/actions?t=${Date.now()}`)
+          xhr.send()
+        })
+      }
+      const getStatus    = () => {
+        status_xhr.open('GET', `/status?t=${Date.now()}`)
+        status_xhr.send()
+      }
+      const postAction   = () => {
+        const xhr = new XMLHttpRequest()
+        const id  = document.querySelector("#actions input:checked").value
+
+        // Abort the status request to avoid blocking this request
+        status_xhr.abort()
+
+        // While the status request will potentially disable the button, this
+        // is required to avoid any event between the end of this call and the
+        // status request response
+        document.getElementById("postAction"  ).setAttribute("disabled", "")
+        document.getElementById("postCommands").setAttribute("disabled", "")
+
+        xhr.onload = getStatus
+
+        xhr.open('POST', `/action?a=${id}`)
+        xhr.send()
+      }
+      const postCommands = () => {
+        let values = document.getElementById("commands").value
+
+        if (values.length > 0) {
+          const xhr = new XMLHttpRequest()
+
+          // Abort the status request to avoid blocking this request
+          status_xhr.abort()
+
+          // Disable both buttons
+          document.getElementById("postAction"  ).setAttribute("disabled", "")
+          document.getElementById("postCommands").setAttribute("disabled", "")
+
+          values = values
+            .replace(/ +/g, ',')
+            .split  (',')
+            .map    (i => parseInt(i, 16))
+
+          values = [values.length, ...values]
+
+          xhr.onload = getStatus
+
+          xhr.open('POST', `/commands`)
+          xhr.send(new Uint16Array(values))
+        }
+      }
+
+      document
+        .getElementById  ("postAction")
+        .addEventListener("click", postAction)
+
+      document
+        .getElementById  ("postCommands")
+        .addEventListener("click", postCommands)
+
+      status_xhr.ontimeout = getStatus
+      status_xhr.onload    = () => {
+        if (status_xhr.status !== 200) {
+          return console.error(`Unexpected HTTP Status: ${status_xhr.status}`)
+        }
+
+        try {
+          for (const status of JSON.parse(status_xhr.response)) {
+            setStatus(status)
+          }
+
+          getStatus()
+        } catch (error) {
+          console.error('Unexpected Error: ', error)
+        }
+      }
+
+      getActions()
+        .then (actions => {
+          for (const action of actions) {
+            addAction(action)
+          }
+
+          if (actions.length > 0) { // Assumed default action is there...
+            document
+              .querySelector('#actions input[value="0"]')
+              .setAttribute ("checked", "")
+          }
+        })
+        .then (getStatus)
+        .catch(console.error)
+    </script>
+  </body>
+</html>

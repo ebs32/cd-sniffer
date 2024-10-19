@@ -4,6 +4,6 @@
 #
 
 PROJECT_NAME         := cd-sniffer
-EXTRA_COMPONENT_DIRS := src
+EXTRA_COMPONENT_DIRS := src/sender
 
 include $(IDF_PATH)/make/project.mk

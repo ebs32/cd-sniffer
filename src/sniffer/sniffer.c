@@ -1,5 +1,3 @@
-#include "sniffer.h"
-
 // ESP8266
 #include "esp8266/gpio_struct.h"
 #include "driver/gpio.h"
@@ -34,8 +32,8 @@ static void IRAM_ATTR handle_int(void* arg) {
   uint32_t status = GPIO.status;
   uint32_t value  = GPIO.in;
 
-  GPIO.status_w1tc = (1UL << CLK_LINE );
-  GPIO.status_w1tc = (1UL << XLT_LINE );
+  GPIO.status_w1tc = (1UL << CLK_LINE);
+  GPIO.status_w1tc = (1UL << XLT_LINE);
 
   // Make sure there is room for at least 1 word
   if (write_index + 1 > BUFFER_SIZE && (BUFFER_SIZE - write_index) + read_index < 1) {
