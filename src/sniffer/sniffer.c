@@ -13,9 +13,9 @@
 #include <stdint.h>
 
 // GPIO Mappings - By default, GPIO01 and GPIO03 are reserved for UART
-#define CLK_LINE    GPIO_NUM_13 // D7
-#define DATA_LINE   GPIO_NUM_12 // D6
 #define XLT_LINE    GPIO_NUM_14 // D5
+#define DATA_LINE   GPIO_NUM_12 // D6
+#define CLK_LINE    GPIO_NUM_13 // D7
 
 // The size of the circular buffer
 #define BUFFER_SIZE 2048
