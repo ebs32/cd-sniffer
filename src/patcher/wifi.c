@@ -1,6 +1,11 @@
-#include "actions.h"
-#include "controller.h"
+#include "common.h"
 #include "resources.h"
+
+// ESP8266
+#include "esp8266/spi_struct.h"
+#include "esp8266/gpio_struct.h"
+#include "esp8266/timer_struct.h"
+#include "driver/gpio.h"
 
 // ESP SDK
 #include "esp_err.h"
@@ -19,29 +24,37 @@
 #include <stdint.h>
 #include <string.h>
 
-#define STATUS_READ_MS      250 // Time period between status reads
+#define MAX_COMMAND_LENGTH 512 // Maximum number of commands to read
 
-// Timeout waiting on the status to change in ticks
-// This can be calculated as (1000 / STATUS_READ_MS) * N_SEC
-#define STATUS_TIMEOUT_T      8
-
-#define EVENT_BUFFER_SIZE    16 // Size of the event buffer
-#define MAX_COMMAND_LENGTH  512 // Maximum number of commands to read
+extern uint16_t tracking_balance;
+extern uint16_t tracking_gain;
 
 static const char* module_id = "wifi";
 
-static TEvent events[EVENT_BUFFER_SIZE];
-static size_t read_idx  = 0;
-static size_t write_idx = 0;
+static void postCommand(uint16_t command) {
+  // Enable the command phase
+  SPI1.user.usr_command         = 1;
 
-static void handle_ctl_update(const TEvent* event) {
-  events[write_idx].is_busy     = event->is_busy;
-  events[write_idx].is_powered  = event->is_powered;
-  events[write_idx].status_text = event->status_text;
+  // Set the command and the length
+  SPI1.user2.usr_command_value  = command;
+  SPI1.user2.usr_command_bitlen = command <= 0xFF
+                                ? 7
+                                : command <= 0xFFF
+                                ? 11
+                                : 15;
 
-  if (++write_idx == EVENT_BUFFER_SIZE) {
-    write_idx = 0;
-  }
+  // Start the operation
+  SPI1.cmd.usr                  = 1;
+
+  while (SPI1.cmd.usr == 1);
+
+  // Trigger the latch signal - At this point the minimum time required for
+  // enabling the latch signal has lapsed
+
+  SET_LO(XLT_CONTROLLER);
+  DELAY (40);
+
+  SET_HI(XLT_CONTROLLER);
 }
 
 static esp_err_t handle_get_resource(httpd_req_t* request) {
@@ -60,72 +73,22 @@ static esp_err_t handle_get_resource(httpd_req_t* request) {
   return httpd_resp_send(request, start, end - start - 1);
 }
 
-static esp_err_t handle_get_actions(httpd_req_t* request) {
-  char   buffer[256 + 1];
-  size_t length = sizeof(actions) / sizeof(TAction);
+static esp_err_t handle_get_tracking_values(httpd_req_t* request) {
+  char       buffer[256 + 1];
+  nvs_handle handle;
+  uint16_t   tracking_balance = 0;
+  uint16_t   tracking_gain    = 0;
 
-  httpd_resp_set_type(request, HTTPD_TYPE_JSON);
-
-  // To save some memory at the cost of speed send a chunked response containing
-  // all the actions available
-  httpd_resp_send_chunk(request, "[", 1);
-
-  for (size_t i = 0; i < length; i++) {
-    sprintf(buffer,
-      "{\"i\":\"%c\",\"d\":\"%s\"}", actions[i].id, actions[i].description
-    );
-
-    httpd_resp_send_chunk(request, buffer, -1);
-
-    if (i + 1 < length) {
-      httpd_resp_send_chunk(request, ",", 1);
-    }
+  if (nvs_open("tracking", NVS_READONLY, &handle) == ESP_OK) {
+    nvs_get_u16(handle, "balance", &tracking_balance);
+    nvs_get_u16(handle, "gain"   , &tracking_gain   );
+    nvs_close  (handle);
   }
 
-  httpd_resp_send_chunk(request, "]", 1);
-
-  return httpd_resp_send_chunk(request, NULL, 0);
-}
-
-static esp_err_t handle_get_status(httpd_req_t* request) {
-  char   buffer[256 + 1];
-  size_t idx;
-  int    socket_fd;
-
-  // Wait for the status to change or the timeout to expire or the client to
-  // abort the request, whichever occurs first
-  socket_fd = httpd_req_to_sockfd(request);
-
-  for (size_t i = 0; read_idx == write_idx && i < STATUS_TIMEOUT_T; i++) {
-    // If this call returns 0 then there is no bytes pending to be to read,
-    // which means the client, potentially, closed the socket on its end
-    if (recv(socket_fd, NULL, 0, MSG_DONTWAIT) == 0) {
-      return ESP_FAIL;
-    }
-
-    vTaskDelay(STATUS_READ_MS / portTICK_RATE_MS);
-  }
-
-  // Send the controller status to the client, which may have changed or not;
-  // but in any case send it as well as the corresponding friendly description
-  // and the flag indicating whether the controller is busy or not
-
-  if(read_idx == write_idx) {
-    idx = (read_idx == 0 ? EVENT_BUFFER_SIZE : read_idx) - 1;
-  } else {
-    idx = read_idx;
-
-    if (++read_idx == EVENT_BUFFER_SIZE) {
-      read_idx = 0;
-    }
-  }
-
-  sprintf(
-    buffer,
-    "[{\"s\":%d,\"t\":\"%s\",\"b\":%d}]",
-    events[idx].is_powered,
-    events[idx].status_text,
-    events[idx].is_busy
+  sprintf(buffer,
+    "{\"balance\":%d,\"gain\":%d}",
+    tracking_balance,
+    tracking_gain
   );
 
   httpd_resp_set_type(request, HTTPD_TYPE_JSON);
@@ -133,27 +96,49 @@ static esp_err_t handle_get_status(httpd_req_t* request) {
   return httpd_resp_send(request, buffer, -1);
 }
 
-static esp_err_t handle_post_action(httpd_req_t* request) {
-  char   buffer[64 + 1];
-  size_t buffer_size = sizeof(buffer) / sizeof(char);
+static esp_err_t handle_post_tracking_values(httpd_req_t* request) {
+  uint16_t   size = 2 * sizeof(uint16_t);
+  char       buffer[size];
+  nvs_handle handle;
 
-  // If the request is valid then execute the requested action and return
-  // the 200/OK response immediately
-  if (
-    httpd_req_get_url_query_str(request, buffer, buffer_size) == ESP_OK &&
-    httpd_query_key_value(buffer, "a", buffer, buffer_size)   == ESP_OK
-  ) {
-    for (size_t i = 0; i < sizeof(actions) / sizeof(TAction); i++) {
-      if (buffer[0] == actions[i].id) {
-        actions[i].fn();
+  for (int m = 0, s; m < size; m += s) {
+    s = httpd_req_recv(request, &buffer[m], size - m);
 
-        return httpd_resp_send(request, NULL, 0);
-      }
+    if (s <= 0) {
+      httpd_resp_set_status(request, HTTPD_500);
+
+      return httpd_resp_send(request, NULL, 0);
     }
   }
 
-  // Otherwise, send a 400/Bad Request response
-  httpd_resp_set_status(request, HTTPD_400);
+  printf("tracking balance = 0x%03x\n", ((uint16_t*) buffer)[0]);
+  printf("tracking gain    = 0x%03x\n", ((uint16_t*) buffer)[1]);
+
+  if (nvs_open("tracking", NVS_READWRITE, &handle) == ESP_OK) {
+    if (
+      nvs_set_u16(handle, "balance", ((uint16_t*) buffer)[0]) != ESP_OK ||
+      nvs_set_u16(handle, "gain"   , ((uint16_t*) buffer)[1]) != ESP_OK ||
+      nvs_commit (handle)                                     != ESP_OK
+    ) {
+      httpd_resp_set_status(request, HTTPD_500);
+    } else {
+      if (tracking_balance != 0) {
+        tracking_balance = ((uint16_t*) buffer)[0];
+
+        postCommand(tracking_balance);
+      }
+
+      if (tracking_gain != 0) {
+        tracking_gain    = ((uint16_t*) buffer)[1];
+
+        postCommand(tracking_gain);
+      }
+    }
+
+    nvs_close(handle);
+  } else {
+    httpd_resp_set_status(request, HTTPD_500);
+  }
 
   return httpd_resp_send(request, NULL, 0);
 }
@@ -197,9 +182,22 @@ static esp_err_t handle_post_commands(httpd_req_t* request) {
   }
 
   // Run the commands - The buffer will be freed by the controller API
-  ctl_run_micom_commands(length, (uint16_t*) buffer);
+  for (size_t i = 0; i < length; i++) {
+    postCommand(((uint16_t*) buffer)[i]);
+
+    vTaskDelay(100 / portTICK_RATE_MS);
+  }
+
+  free(buffer);
 
   return httpd_resp_send(request, NULL, 0);
+}
+
+static esp_err_t handle_post_restart(httpd_req_t* request) {
+  httpd_resp_send(request, NULL, 0);
+  esp_restart();
+
+  return ESP_OK;
 }
 
 static esp_err_t set_up_wifi() {
@@ -253,11 +251,11 @@ static esp_err_t set_up_http() {
     );
   } else { // Register URI handlers
     const httpd_uri_t handlers[] = {
-      { .method = HTTP_GET , .uri = "/"        , .handler = handle_get_resource  },
-      { .method = HTTP_GET , .uri = "/actions" , .handler = handle_get_actions   },
-      { .method = HTTP_GET , .uri = "/status"  , .handler = handle_get_status    },
-      { .method = HTTP_POST, .uri = "/action"  , .handler = handle_post_action   },
-      { .method = HTTP_POST, .uri = "/commands", .handler = handle_post_commands },
+      { .method = HTTP_GET , .uri = "/"               , .handler = handle_get_resource         },
+      { .method = HTTP_GET , .uri = "/tracking-values", .handler = handle_get_tracking_values  },
+      { .method = HTTP_POST, .uri = "/tracking-values", .handler = handle_post_tracking_values },
+      { .method = HTTP_POST, .uri = "/commands"       , .handler = handle_post_commands        },
+      { .method = HTTP_POST, .uri = "/restart"        , .handler = handle_post_restart         },
     };
 
     for (size_t i = 0; i < sizeof(handlers) / sizeof(httpd_uri_t); i++) {
@@ -295,7 +293,7 @@ void wifi_stop() {
 
 int32_t wifi_start() {
   if (set_up_wifi() == ESP_OK) {
-    if (set_up_http() != ESP_OK || ctl_add_listener(handle_ctl_update) != 0) {
+    if (set_up_http() != ESP_OK) {
       wifi_stop();
 
       return -1;
