@@ -45,8 +45,8 @@ static void handle_ctl_update(const TEvent* event) {
 }
 
 static esp_err_t handle_get_resource(httpd_req_t* request) {
-  const char *start;
-  const char *end;
+  const char* start;
+  const char* end;
 
   if (
     strcmp(request->uri, "/") == 0)

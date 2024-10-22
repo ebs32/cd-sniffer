@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>CD Sniffer - Sender</title>
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1">
+    <style>
+      body    { margin: 1vh; }
+      .spacer { margin: 1vh; }
+      #status { color: steelblue }
+    </style>
+  </head>
+  <body>
+    <div id="main">
+      <div>
+        <b>WARNING!</b> Once you are done, restart ESP so the WiFi ISR does not affect the performance
+        <button style="float: right" id="restartESP" disabled>Restart ESP</button>
+      </div>
+      <div style="clear: both"></div>
+      <hr>
+      <div class="spacer">
+        <b>Tracking</b>
+        <ul>
+          <li>Values are applied immediately, even if a disc is playing.</li>
+          <li>If setting to automatic, the system must be disconnected from the mains afterwards.</li>
+        </ul>
+        Balance:
+        <select id="balance">
+          <option value="0" selected>Auto</option>
+        </select>
+        Gain:
+        <select id="gain">
+          <option value="0" selected>Auto</option>
+        </select>
+        <button class="" id="postTrackingValues" disabled>Set</button>
+      </div>
+      <hr>
+      <div class="spacer" style="padding-right: 1vh;">
+        <b>Commands</b>
+        <ul>
+          <li>For running commands a disc must be being played or the RESET line must be pulled to B+ and the cable from the CPU must be removed.</li>
+          <li>A delay of ~100 ms is introduced between each command.</li>
+          <li>Be careful with commands that move the optical pickup as it could hit the chassis.</li>
+        </ul>
+      </div>
+      <div class="spacer">
+        <input type="text" id="commands" style="width:100%">
+      </div>
+      <button class="spacer" id="postCommands" disabled>Execute</button>
+    </div>
+    <script type="module">
+      const disableActions                = () => {
+        document.getElementById("restartESP"        ).setAttribute("disabled", "")
+        document.getElementById("postTrackingValues").setAttribute("disabled", "")
+        document.getElementById("postCommands"      ).setAttribute("disabled", "")
+      }
+      const enableActions                 = () => {
+        document.getElementById("restartESP"        ).removeAttribute("disabled")
+        document.getElementById("postTrackingValues").removeAttribute("disabled")
+        document.getElementById("postCommands"      ).removeAttribute("disabled")
+      }
+      const populateTrackingBalanceSelect = () => {
+        const root = document.getElementById("balance")
+
+        for (let i = 0x800; i <= 0x81f; i++) {
+          const option = document.createElement("option")
+
+          option.value     = i
+          option.innerHTML = '0x' + i.toString(16)
+
+          root.appendChild(option)
+        }
+      }
+      const populateTrackingGainSelect    = () => {
+        const root = document.getElementById("gain")
+
+        for (let i = 0x820; i <= 0x83f; i++) {
+          const option = document.createElement("option")
+
+          option.value     = i
+          option.innerHTML = '0x' + i.toString(16)
+
+          root.appendChild(option)
+        }
+      }
+      const getTrackingValues             = () => {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+
+          xhr.onerror   = reject
+          xhr.ontimeout = reject
+          xhr.onload    = () => {
+            if (xhr.status !== 200) {
+              return reject(`Unexpected HTTP Status: ${xhr.status}`)
+            }
+
+            try {
+              resolve(
+                JSON.parse(xhr.response)
+              )
+            } catch (error) {
+              reject(error)
+            }
+          }
+
+          xhr.open('GET', `/tracking-values?t=${Date.now()}`)
+          xhr.send()
+        })
+      }
+      const postRestartESP                = () => {
+        const xhr = new XMLHttpRequest()
+
+        disableActions()
+
+        xhr.open('POST', `/restart`)
+        xhr.send()
+      }
+      const postTrackingValues            = () => {
+        const xhr    = new XMLHttpRequest()
+        const values = [
+          document.querySelector("#balance option:checked").value,
+          document.querySelector("#gain    option:checked").value,
+        ]
+
+        disableActions()
+        xhr.onload = enableActions
+
+        xhr.open('POST', `/tracking-values`)
+        xhr.send(new Uint16Array(values))
+      }
+      const postCommands                  = () => {
+        let values = document.getElementById("commands").value
+
+        if (values.length > 0) {
+          const xhr = new XMLHttpRequest()
+
+          disableActions()
+          xhr.onload = enableActions
+
+          values = values
+            .replace(/ +/g, ',')
+            .split  (',')
+            .map    (i => parseInt(i, 16))
+
+          values = [values.length, ...values]
+
+          xhr.open('POST', `/commands`)
+          xhr.send(new Uint16Array(values))
+        }
+      }
+
+      getTrackingValues()
+        .then (trackingValues => {
+          populateTrackingBalanceSelect();
+          populateTrackingGainSelect   ();
+
+          document
+            .querySelector(`#balance option[value="${trackingValues.balance}"]`)
+            .setAttribute ("selected", "")
+
+          document
+            .querySelector(`#gain option[value="${trackingValues.gain}"]`)
+            .setAttribute ("selected", "")
+
+          document
+            .getElementById  ("restartESP")
+            .addEventListener("click", postRestartESP)
+
+          document
+            .getElementById  ("postTrackingValues")
+            .addEventListener("click", postTrackingValues)
+
+          document
+            .getElementById  ("postCommands")
+            .addEventListener("click", postCommands)
+
+          enableActions()
+        })
+        .catch(console.error)
+    </script>
+  </body>
+</html>
